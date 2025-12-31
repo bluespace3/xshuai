@@ -322,4 +322,36 @@ def _detect_scenario(self, user_input: str) -> str:
 | **输出清洁度** | 有警告干扰 | 完全清洁 |
 | **场景识别** | 基础检测 | 智能多场景路由 |
 
-**⚡ 小帅终端助手（优化版）- 彻底消除警告，性能翻倍提升！**
+## 🌐 VPN使用指南
+
+### 🚫 问题：VPN环境下无法连接
+当开启VPN后，可能会遇到502错误，这是因为VPN改变了网络路由。
+
+### ✅ 解决方案
+
+#### 方法1：使用修复脚本（推荐）
+```bash
+# 运行VPN修复脚本
+D:\code\py\xshuai\utils\fix-vpn-connection.bat
+```
+
+#### 方法2：使用VPN兼容启动脚本
+```bash
+# 启动VPN兼容的Ollama服务
+D:\code\py\xshuai\utils\start-ollama-vpn.bat
+```
+
+#### 方法3：手动配置
+```bash
+# 设置环境变量
+set OLLAMA_HOST=0.0.0.0
+set OLLAMA_ORIGINS=*
+
+# 启动Ollama
+ollama serve --host 0.0.0.0 --port 11434
+```
+
+### 🔧 自动检测
+程序会自动检测VPN环境并使用兼容模式启动，但建议手动运行修复脚本以确保最佳效果。
+
+**⚡ 小帅终端助手（优化版）- 彻底消除警告，性能翻倍提升，VPN兼容！**

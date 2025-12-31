@@ -5,6 +5,9 @@ from agents.agent import agent
 from agentscope.message import Msg
 from ollama import Client
 
+# 全局变量用于保持Ollama日志文件句柄打开
+_ollama_log_handle = None
+
 # 设置环境变量来抑制警告
 os.environ['PYTHONWARNINGS'] = 'ignore'
 
@@ -66,19 +69,44 @@ def safe_print(text, end='\n', flush=True):
         print(cleaned_text, end=end, flush=flush)
 
 def is_ollama_running():
-    """检查Ollama服务是否正在运行"""
+    """检查Ollama服务是否正在运行，支持VPN环境"""
     try:
         import subprocess
-        result = subprocess.run(['ollama', 'ps'], capture_output=True, text=True, timeout=5)
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        import socket
+
+        # 方法1：检查端口是否被监听（最快）
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(('127.0.0.1', 11434))
+            sock.close()
+            if result == 0:
+                return True
+        except:
+            pass
+
+        # 方法2：检查进程是否存在
+        try:
+            result = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq ollama.exe'],
+                                  capture_output=True, text=True, timeout=2)
+            if 'ollama.exe' in result.stdout:
+                return True
+        except:
+            pass
+
+        return False
+
+    except Exception:
         return False
 
 def ensure_ollama_running():
     """确保Ollama服务正在运行，如果未运行则启动它"""
+    safe_print("检查 Ollama 服务状态...")
     # 首先检查Ollama是否已经在运行
     if is_ollama_running():
+        safe_print("Ollama 服务已在运行")
         return True
+    safe_print("Ollama 服务未运行，尝试启动...")
 
     # 检查ollama命令是否存在
     try:
@@ -95,26 +123,53 @@ def ensure_ollama_running():
     try:
         safe_print("检测到Ollama服务未运行，正在启动...")
         import subprocess
-        # 在后台启动Ollama服务
-        subprocess.Popen(['ollama', 'serve'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        import os
+        import datetime
 
-        # 主动轮询检查服务是否启动成功（最多30秒）
+        # 创建logs目录
+        logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        if not os.path.exists(logs_dir):
+            os.makedirs(logs_dir)
+
+        # 生成带时间戳的日志文件名
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join(logs_dir, f"ollama_{timestamp}.log")
+
+        # 检测是否需要VPN兼容模式
+        vpn_mode = False
+        try:
+            # 检查是否有VPN网络接口（简单检测）
+            result = subprocess.run(['ipconfig'], capture_output=True, text=True, timeout=5)
+            if 'VPN' in result.stdout or 'Tunnel' in result.stdout:
+                vpn_mode = True
+                safe_print("检测到VPN环境，使用兼容模式启动...")
+        except:
+            pass
+
+        # 打开日志文件用于写入并存储为全局变量
+        global _ollama_log_handle
+        _ollama_log_handle = open(log_file, 'w', encoding='utf-8')
+
+        # 启动Ollama服务
+        if vpn_mode:
+            # VPN兼容模式：监听所有接口
+            env = os.environ.copy()
+            env['OLLAMA_HOST'] = '0.0.0.0'
+            env['OLLAMA_ORIGINS'] = '*'
+            subprocess.Popen(['ollama', 'serve', '--host', '0.0.0.0', '--port', '11434'],
+                           stdout=_ollama_log_handle, stderr=_ollama_log_handle, env=env)
+        else:
+            # 标准模式
+            subprocess.Popen(['ollama', 'serve'], stdout=_ollama_log_handle, stderr=_ollama_log_handle)
+
+        safe_print(f"Ollama服务已在后台启动，日志保存至: {log_file}")
+
+        # 等待一小段时间确保 Ollama 开始监听端口
         import time
-        max_wait_time = 30
-        check_interval = 2
-        elapsed_time = 0
+        time.sleep(2)
+        safe_print("等待 2 秒后继续执行...")
 
-        while elapsed_time < max_wait_time:
-            if is_ollama_running():
-                safe_print("Ollama服务已成功启动！")
-                return True
-            time.sleep(check_interval)
-            elapsed_time += check_interval
-            if elapsed_time % 10 == 0:  # 每10秒提示一次
-                safe_print(f"Ollama服务仍在启动中... ({elapsed_time}s)")
-
-        safe_print("警告: Ollama服务启动超时，请手动检查。")
-        return False
+        return True
 
     except Exception as e:
         safe_print(f"启动Ollama服务时出错: {e}")
@@ -413,23 +468,37 @@ async def stream_response(msg):
             # Prepare messages for Ollama
             messages = [{"role": "user", "content": user_input}]
 
-            # Create Ollama client
+            # Create Ollama client (不设置超时，避免影响流式输出)
             client = Client()
 
             # Stream the response directly from Ollama
-            stream = client.chat(
-                model=model_name,
-                messages=messages,
-                stream=True
-            )
+            try:
+                safe_print("正在生成响应...")
+                stream = client.chat(
+                    model=model_name,
+                    messages=messages,
+                    stream=True
+                )
 
-            # Process the stream
-            for chunk in stream:
-                if 'message' in chunk and 'content' in chunk['message']:
-                    content = chunk['message']['content']
-                    if content:
-                        safe_print(content, end='', flush=True)
-            print()  # Final newline
+                # Process the stream with real-time output
+                response_text = ""
+                for chunk in stream:
+                    if 'message' in chunk and 'content' in chunk['message']:
+                        content = chunk['message']['content']
+                        if content:
+                            # 立即输出每个字符
+                            safe_print(content, end='', flush=True)
+                            response_text += content
+
+                if response_text:
+                    print()  # Final newline
+                else:
+                    safe_print("未收到有效响应")
+
+            except Exception as e:
+                safe_print(f"\n连接 Ollama 服务失败: {e}")
+                safe_print("请检查 Ollama 服务是否正常启动...")
+                return
         else:
             # For tool/vision scenarios, use AgentScope with better feedback
 
