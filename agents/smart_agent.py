@@ -6,7 +6,7 @@ from agentscope.formatter import OllamaChatFormatter
 from agentscope.memory import InMemoryMemory
 from agentscope.tool import Toolkit
 from agentscope.message import Msg
-from configparser import ConfigParser
+from config_manager import config
 
 from llm import XXzhouModel
 from tools.download_video import download_video
@@ -124,41 +124,13 @@ class SmartAgent:
 
     def _load_model_config(self):
         """从配置文件加载模型配置"""
-        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'model_config.ini')
-
-        if not os.path.exists(config_path):
-            # 如果配置文件不存在，使用默认配置
-            print(f"[警告] 配置文件 {config_path} 不存在，使用默认配置")
-            return {
-                'tool': 'zdolny/qwen3-coder58k-tools:latest',
-                'text': 'gpt-oss:20b',
-                'vision': 'gemma3:27b'
-            }
-
-        config = ConfigParser()
-        config.read(config_path, encoding='utf-8')
-
-        if 'models' not in config:
-            print("[警告] 配置文件缺少 [models] 部分，使用默认配置")
-            return {
-                'tool': 'zdolny/qwen3-coder58k-tools:latest',
-                'text': 'gpt-oss:20b',
-                'vision': 'gemma3:27b'
-            }
-
-        models_config = config['models']
-        return {
-            'tool': models_config.get('tool_model', 'zdolny/qwen3-coder58k-tools:latest'),
-            'text': models_config.get('text_model', 'gpt-oss:20b'),
-            'vision': models_config.get('vision_model', 'qwen3-vl:8b'),
-            'ocr': models_config.get('ocr_model', 'qwen3-vl:8b')  # OCR使用专用模型配置
-        }
+        return config.get_models()
 
     def _detect_scenario(self, user_input: str) -> str:
         """检测用户输入的场景类型"""
         user_input = user_input.lower()
 
-        # 检测是否为OCR专用命令
+        # OCR检测
         ocr_patterns = [
             r'^ocr\s', r'文字识别', r'文本识别', r'提取文字',
             r'识别.*文字', r'图片.*文字', r'截图.*文字',
@@ -169,18 +141,7 @@ class SmartAgent:
             if re.search(pattern, user_input):
                 return 'ocr'
 
-        # 检测是否需要图像识别
-        image_patterns = [
-            r'图片.*内容', r'图片.*是什么', r'图片.*描述',
-            r'图片.*识别', r'.*\.png', r'.*\.jpg', r'.*\.jpeg',
-            r'.*\.gif', r'.*\.webp', r'图像.*内容', r'照片.*内容'
-        ]
-
-        for pattern in image_patterns:
-            if re.search(pattern, user_input):
-                return 'vision'
-
-        # 检测是否需要工具调用
+        # 工具检测
         tool_patterns = [
             r'下载.*视频', r'生成.*图片', r'创建.*图片', r'图片.*生成',
             r'下载.*音乐', r'下载.*文件', r'图片.*处理', r'给.*图片.*',
@@ -191,15 +152,45 @@ class SmartAgent:
             if re.search(pattern, user_input):
                 return 'tool'
 
-        # 检测是否包含文件路径（可能是图像相关）
+        # 文件路径检测（更严格的路径检测）
         file_patterns = [
-            r'[a-zA-Z]:\\[^\\]+\\[^\\]+\\[^\\]+\.(png|jpg|jpeg|gif|webp)',
-            r'[^\\]+\.(png|jpg|jpeg|gif|webp)'
+            r'[a-zA-Z]:\\[^\\]+\\[^\\]+\\[^\\]+\.(png|jpg|jpeg|gif|webp)',  # Windows完整路径
+            r'^[^\\]+\.(png|jpg|jpeg|gif|webp)$',  # 独立文件名（行首到行尾）
+            r'[^\\s]+\.(png|jpg|jpeg|gif|webp)(?:\s|$)',  # 文件名后跟空白或行尾
         ]
 
         for pattern in file_patterns:
             if re.search(pattern, user_input):
                 return 'vision'
+
+        # 只有明确包含图片扩展名且看起来像文件路径时才识别为vision
+        if re.search(r'.*\.(png|jpg|jpeg|gif|webp)', user_input):
+            # 额外检查：如果包含路径分隔符或者是完整路径，才识别为vision
+            if ('\\' in user_input or '/' in user_input or
+                user_input.strip().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp'))):
+                return 'vision'
+
+        # 智能图像检测：只有当包含图片关键字 AND 包含文件路径/图片引用时才触发vision
+        image_keyword_patterns = [
+            r'图片.*内容', r'图片.*是什么', r'图片.*描述',
+            r'图片.*识别', r'图像.*内容', r'照片.*内容'
+        ]
+
+        has_image_keywords = any(re.search(pattern, user_input) for pattern in image_keyword_patterns)
+
+        # 检查是否包含实际的图片引用（路径、URL、或明确的图片提及）
+        has_actual_image_reference = (
+            '\\' in user_input or  # Windows路径
+            '/' in user_input or   # Unix路径
+            'http' in user_input or  # URL
+            'www' in user_input or   # WWW
+            user_input.strip().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')) or  # 文件结尾
+            re.search(r'(?:附[上|件]|上传|提供|这张|那张).*图片', user_input) or  # 明确的图片引用
+            re.search(r'截图|截屏|屏幕快照', user_input)  # 截图相关
+        )
+
+        if has_image_keywords and has_actual_image_reference:
+            return 'vision'
 
         # 默认为文本对话
         return 'text'

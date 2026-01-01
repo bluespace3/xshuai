@@ -138,7 +138,7 @@ class EnhancedXXzhouModel:
             SilentOllamaChatModel: 配置了静音处理的视觉模型
         """
         return SilentOllamaChatModel(
-            model_name=self.model_config['vision_model'],
+            model_name=self.model_config['vision'],
             stream=True,
             options={
                 "temperature": 0.5,
@@ -189,7 +189,7 @@ class EnhancedXXzhouModel:
             SilentOllamaChatModel: 专门用于 OCR 的模型
         """
         return SilentOllamaChatModel(
-            model_name=self.model_config.get('ocr_model', self.model_config['vision_model']),
+            model_name=self.model_config.get('ocr', self.model_config['vision']),
             stream=True,
             options={
                 "temperature": 0.1,  # OCR 需要更高的确定性

@@ -1,12 +1,28 @@
 import sys,asyncio,os
 import warnings
 import logging
+import atexit
 from agents.agent import agent
 from agentscope.message import Msg
 from ollama import Client
+from decorators import safe_execute, retry_on_failure
+from config_manager import config
 
 # 全局变量用于保持Ollama日志文件句柄打开
 _ollama_log_handle = None
+
+def close_ollama_log():
+    """安全关闭Ollama日志文件句柄"""
+    global _ollama_log_handle
+    if _ollama_log_handle and not _ollama_log_handle.closed:
+        try:
+            _ollama_log_handle.close()
+        except Exception:
+            pass
+        _ollama_log_handle = None
+
+# 注册清理函数
+atexit.register(close_ollama_log)
 
 # 设置环境变量来抑制警告
 os.environ['PYTHONWARNINGS'] = 'ignore'
@@ -68,37 +84,40 @@ def safe_print(text, end='\n', flush=True):
         cleaned_text = ''.join(char for char in text if ord(char) < 65536)
         print(cleaned_text, end=end, flush=flush)
 
+@safe_execute(default_return=False, exceptions=(ConnectionError, TimeoutError, OSError))
 def is_ollama_running():
     """检查Ollama服务是否正在运行，支持VPN环境"""
+    import subprocess
+    import socket
+
+    # 从配置获取端口
+    system_config = config.get_system_config()
+    ollama_port = system_config['ollama_port']
+    ollama_host = system_config['ollama_host']
+
+    # 方法1：检查端口是否被监听（最快）
     try:
-        import subprocess
-        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(system_config['connection_timeout'])
+        result = sock.connect_ex((ollama_host, ollama_port))
+        sock.close()
+        if result == 0:
+            return True
+    except (socket.error, OSError) as e:
+        logging.debug(f"Port check failed: {e}")
 
-        # 方法1：检查端口是否被监听（最快）
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1)
-            result = sock.connect_ex(('127.0.0.1', 11434))
-            sock.close()
-            if result == 0:
-                return True
-        except:
-            pass
+    # 方法2：检查进程是否存在
+    try:
+        result = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq ollama.exe'],
+                              capture_output=True, text=True, timeout=2)
+        if 'ollama.exe' in result.stdout:
+            return True
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as e:
+        logging.debug(f"Process check failed: {e}")
 
-        # 方法2：检查进程是否存在
-        try:
-            result = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq ollama.exe'],
-                                  capture_output=True, text=True, timeout=2)
-            if 'ollama.exe' in result.stdout:
-                return True
-        except:
-            pass
+    return False
 
-        return False
-
-    except Exception:
-        return False
-
+@safe_execute(default_return=False, exceptions=(subprocess.TimeoutExpired, FileNotFoundError, OSError, PermissionError))
 def ensure_ollama_running():
     """确保Ollama服务正在运行，如果未运行则启动它"""
     safe_print("检查 Ollama 服务状态...")
@@ -115,8 +134,8 @@ def ensure_ollama_running():
         if result.returncode != 0:
             safe_print("错误: 未找到Ollama命令。请确保已安装Ollama。")
             return False
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        safe_print("错误: 未找到Ollama命令。请确保已安装Ollama。")
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        safe_print(f"错误: 未找到Ollama命令。请确保已安装Ollama。详情: {e}")
         return False
 
     # 启动Ollama服务
@@ -148,7 +167,14 @@ def ensure_ollama_running():
 
         # 打开日志文件用于写入并存储为全局变量
         global _ollama_log_handle
-        _ollama_log_handle = open(log_file, 'w', encoding='utf-8')
+        if _ollama_log_handle:
+            close_ollama_log()  # 先关闭之前的句柄
+
+        try:
+            _ollama_log_handle = open(log_file, 'w', encoding='utf-8')
+        except Exception as e:
+            safe_print(f"无法创建日志文件 {log_file}: {e}")
+            _ollama_log_handle = None
 
         # 启动Ollama服务
         if vpn_mode:
